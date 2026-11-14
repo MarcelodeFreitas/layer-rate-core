@@ -9,7 +9,7 @@ printers, saved materials, presets, quote history, PDFs, customer accounts, or U
 Project naming:
 - Human-facing brand: LayerRate Core
 - Repository/folder/package slug: layer-rate-core
-- Future ecosystem slugs should use the same readable style, such as layer-rate-web, layer-rate-mcp, and layer-rate-slicer.
+- Future ecosystem slugs should use the same readable style, such as layer-rate-web, layer-rate-plugin, and layer-rate-slicer.
 
 ## Current Scope
 
@@ -23,6 +23,7 @@ LayerRate Core calculates one quote with a quantity. It supports:
 - optional tax
 - named seller fees recovered into the price
 - named customer-paid fees added on top
+- optional pricing basis controls for tax and customer-paid percentage fees
 
 The package is currency agnostic. Currency values are raw numbers, and the caller
 must use the same currency throughout one calculation.
@@ -81,6 +82,22 @@ The engine returns raw decimal numbers, including:
 
 Apps should round and format currency values for display, quotes, invoices, and
 locale-specific output.
+
+## Pricing Assumptions
+
+`failRatioPercent` is a surcharge ratio applied to the failed-job cost basis. It
+is not modeled as a statistical failure probability.
+
+By default, tax is calculated on the sale price before customer-paid add-on
+fees, and add-on percentage fees are calculated from the pre-tax customer price.
+Callers can opt into alternate quote-level basis rules:
+
+```ts
+pricingOptions: {
+  taxBasis: "salePricePlusAddOnTopFees",
+  addOnTopFeePercentBasis: "finalCustomerPrice",
+}
+```
 
 ## Development
 

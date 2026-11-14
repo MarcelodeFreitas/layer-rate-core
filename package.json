@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "Open-source 3D print pricing engine with transparent quote breakdowns.",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -21,8 +24,8 @@
     "build": "tsc -p tsconfig.json",
     "prebuild": "npm run clean",
     "prepack": "npm run build",
-    "test": "vitest run",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "test": "npm run build && vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit"
   },
   "keywords": [
     "3d-printing",
@@ -32,6 +35,9 @@
     "slicer"
   ],
   "license": "MIT",
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
   "devDependencies": {
     "typescript": "^5.9.3",
     "vitest": "^4.0.8"

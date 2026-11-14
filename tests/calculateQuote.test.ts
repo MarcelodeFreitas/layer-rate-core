@@ -1,35 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { calculateQuote } from "../src/index.js";
 import type { LayerRateQuoteInput } from "../src/index.js";
-
-function quoteInput(overrides: Partial<LayerRateQuoteInput> = {}): LayerRateQuoteInput {
-  return {
-    designCost: 12,
-    materials: [
-      {
-        name: "PLA",
-        amount: { value: 80, unit: "g" },
-        costPer: { value: 25, unit: "kg" },
-      },
-    ],
-    printTime: { hours: 3 },
-    printerPurchasePrice: 600,
-    printerPowerWatts: 200,
-    electricityCostPerKwh: 1,
-    printerLifetimeYears: 4,
-    typicalUsageHoursPerDay: 5,
-    repairRatioPercent: 30,
-    laborCostPerHour: 20,
-    setupTime: { minutes: 6 },
-    operationsTime: { minutes: 9 },
-    postProcessingTime: { minutes: 12 },
-    failRatioPercent: 15,
-    componentCost: 3,
-    pricing: { mode: "markup", percent: 80 },
-    quantity: 3,
-    ...overrides,
-  };
-}
+import {
+  LayerRateValidationError,
+  parseQuoteInput,
+  validateQuoteInput,
+} from "../src/index.js";
+import { quoteInput } from "./fixtures.js";
 
 describe("calculateQuote", () => {
   it("matches a validated single-job reference example", () => {
@@ -236,6 +213,60 @@ describe("calculateQuote", () => {
     expect(quote.totalProfitAllJobs).toBeCloseTo(0, 6);
   });
 
+  it("can tax add-on customer fees when configured", () => {
+    const quote = calculateQuote(
+      quoteInput({
+        pricing: { mode: "markup", percent: 0 },
+        fees: [{ name: "Fixed customer fee", fixedAmount: 2, behavior: "addOnTop" }],
+        taxPercent: 20,
+        pricingOptions: { taxBasis: "salePricePlusAddOnTopFees" },
+      }),
+    );
+
+    expect(quote.addOnTopFees).toBeCloseTo(2, 6);
+    expect(quote.tax).toBeCloseTo((quote.baseCustomerPriceAllJobs + 2) * 0.2, 6);
+    expect(quote.customerPriceAllJobs).toBeCloseTo(
+      quote.baseCustomerPriceAllJobs + 2 + quote.tax,
+      6,
+    );
+  });
+
+  it("can calculate add-on percentage fees from the final customer price", () => {
+    const quote = calculateQuote(
+      quoteInput({
+        pricing: { mode: "markup", percent: 0 },
+        fees: [{ name: "Customer fee", percent: 10, behavior: "addOnTop" }],
+        taxPercent: 20,
+        pricingOptions: {
+          taxBasis: "salePricePlusAddOnTopFees",
+          addOnTopFeePercentBasis: "finalCustomerPrice",
+        },
+      }),
+    );
+    const expectedAddOnFees = (quote.baseCustomerPriceAllJobs * 0.1 * 1.2) / 0.88;
+
+    expect(quote.addOnTopFees).toBeCloseTo(expectedAddOnFees, 6);
+    expect(quote.tax).toBeCloseTo(
+      (quote.baseCustomerPriceAllJobs + expectedAddOnFees) * 0.2,
+      6,
+    );
+  });
+
+  it("keeps failRatioPercent as a failed-cost surcharge ratio", () => {
+    const quote = calculateQuote(
+      quoteInput({
+        failRatioPercent: 100,
+      }),
+    );
+    const failedCostBasis =
+      quote.perJob.material +
+      quote.perJob.printerPower +
+      quote.perJob.runtime +
+      quote.perJob.operations;
+
+    expect(quote.perJob.failedJobSurcharge).toBeCloseTo(failedCostBasis, 6);
+  });
+
   it("rejects invalid units, empty materials, bad durations, bad margin percent, and bad fees", () => {
     expect(() =>
       calculateQuote(
@@ -277,5 +308,90 @@ describe("calculateQuote", () => {
         }),
       ),
     ).toThrow("recover fee percentages must total less than 100.");
+  });
+
+  it("rejects malformed runtime input shapes with validation errors", () => {
+    expect(() =>
+      calculateQuote(
+        quoteInput({ printTime: null } as unknown as Partial<LayerRateQuoteInput>),
+      ),
+    ).toThrow("printTime must be an object.");
+
+    expect(() =>
+      calculateQuote(
+        quoteInput({ pricing: null } as unknown as Partial<LayerRateQuoteInput>),
+      ),
+    ).toThrow("pricing must be an object.");
+
+    expect(() =>
+      calculateQuote(
+        quoteInput({
+          materials: [{}],
+        } as unknown as Partial<LayerRateQuoteInput>),
+      ),
+    ).toThrow("materials[0].amount must be an object.");
+
+    expect(() =>
+      calculateQuote(
+        quoteInput({ fees: {} } as unknown as Partial<LayerRateQuoteInput>),
+      ),
+    ).toThrow("fees must be an array.");
+  });
+
+  it("rejects incomplete or zero-value fee definitions", () => {
+    expect(() =>
+      calculateQuote(
+        quoteInput({
+          fees: [
+            {
+              fixedAmount: 1,
+              behavior: "recover",
+            } as unknown as NonNullable<LayerRateQuoteInput["fees"]>[number],
+          ],
+        }),
+      ),
+    ).toThrow("fees[0].name must be a string.");
+
+    expect(() =>
+      calculateQuote(
+        quoteInput({
+          fees: [{ name: "Empty fee", behavior: "recover" }],
+        }),
+      ),
+    ).toThrow("fees[0] must include a positive fixedAmount or percent.");
+  });
+
+  it("rejects final-customer-price add-on fee percentages that cannot be recovered", () => {
+    expect(() =>
+      calculateQuote(
+        quoteInput({
+          fees: [{ name: "Customer fee", percent: 90, behavior: "addOnTop" }],
+          taxPercent: 20,
+          pricingOptions: {
+            taxBasis: "salePricePlusAddOnTopFees",
+            addOnTopFeePercentBasis: "finalCustomerPrice",
+          },
+        }),
+      ),
+    ).toThrow("addOnTop fee percentages are too high for final customer price basis.");
+  });
+
+  it("returns structured validation issues from the public validation API", () => {
+    const issues = validateQuoteInput(
+      quoteInput({
+        fees: [{ name: "Bad percent", percent: 100, behavior: "recover" }],
+      }),
+    );
+
+    expect(issues).toEqual([
+      expect.objectContaining({
+        code: "custom",
+        path: "fees",
+        message: "recover fee percentages must total less than 100.",
+      }),
+    ]);
+    expect(() => parseQuoteInput({ ...quoteInput(), materials: [] })).toThrow(
+      LayerRateValidationError,
+    );
   });
 });

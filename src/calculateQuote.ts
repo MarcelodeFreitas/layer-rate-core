@@ -1,23 +1,32 @@
+import { LayerRateCalculationError } from "./errors.js";
+import {
+  durationToHours,
+  massToGrams,
+  percent,
+  sumBreakdown,
+  sumFees,
+} from "./math.js";
 import type {
-  AmountWithMassUnit,
-  DurationInput,
   FeeCostBreakdown,
   FeeInput,
   LayerRateQuoteInput,
   LayerRateQuoteResult,
   MaterialCostBreakdown,
   MaterialInput,
+  PricingOptionsInput,
   QuoteCostBreakdown,
 } from "./types.js";
+import { assertValidQuoteInput } from "./validation.js";
 
-const HOURS_PER_DAY = 24;
 const DAYS_PER_YEAR = 365;
-const MINUTES_PER_HOUR = 60;
-const GRAMS_PER_KG = 1000;
 const WATTS_PER_KW = 1000;
+const DEFAULT_PRICING_OPTIONS: Required<PricingOptionsInput> = {
+  taxBasis: "salePrice",
+  addOnTopFeePercentBasis: "preTaxCustomerPrice",
+};
 
 export function calculateQuote(input: LayerRateQuoteInput): LayerRateQuoteResult {
-  validateInput(input);
+  assertValidQuoteInput(input);
 
   const quantity = input.quantity;
   const printHours = durationToHours(input.printTime);
@@ -88,13 +97,21 @@ export function calculateQuote(input: LayerRateQuoteInput): LayerRateQuoteResult
   const feeBreakdown = calculateFees(input.fees ?? [], baseCustomerPriceAllJobs);
   const recoverableFees = sumFees(feeBreakdown.recoverable);
   const salePriceAllJobs = baseCustomerPriceAllJobs + recoverableFees;
-  const addOnTopFeeBreakdown = calculateAddOnTopFees(input.fees ?? [], salePriceAllJobs);
-  const addOnTopFees = sumFees(addOnTopFeeBreakdown);
+  const pricingOptions = normalizePricingOptions(input.pricingOptions);
+  const taxPercent = percent(input.taxPercent ?? 0);
+  const customerCharge = calculateCustomerCharge(
+    input.fees ?? [],
+    salePriceAllJobs,
+    taxPercent,
+    pricingOptions,
+  );
+  const addOnTopFeeBreakdown = customerCharge.addOnTopFeeBreakdown;
+  const addOnTopFees = customerCharge.addOnTopFees;
   const fees = {
     recoverable: feeBreakdown.recoverable,
     addOnTop: addOnTopFeeBreakdown,
   };
-  const tax = salePriceAllJobs * percent(input.taxPercent ?? 0);
+  const tax = customerCharge.tax;
   const customerPriceAllJobs = salePriceAllJobs + addOnTopFees + tax;
   const sellerReceivesAllJobs = salePriceAllJobs - recoverableFees;
   const totalProfitAllJobs = sellerReceivesAllJobs - productionCostAllJobs;
@@ -175,8 +192,22 @@ function calculateRecoverableFees(
 
 function calculateAddOnTopFees(
   fees: FeeInput[],
-  salePriceAllJobs: number,
+  basisAmount: number,
 ): FeeCostBreakdown[] {
+  const addOnTopFees = fees.filter((fee) => fee.behavior === "addOnTop");
+  return addOnTopFees.map((fee) => toFeeBreakdown(fee, basisAmount));
+}
+
+function calculateCustomerCharge(
+  fees: FeeInput[],
+  salePriceAllJobs: number,
+  taxPercent: number,
+  pricingOptions: Required<PricingOptionsInput>,
+): {
+  addOnTopFeeBreakdown: FeeCostBreakdown[];
+  addOnTopFees: number;
+  tax: number;
+} {
   const addOnTopFees = fees.filter((fee) => fee.behavior === "addOnTop");
   const totalFixedAmount = addOnTopFees.reduce(
     (sum, fee) => sum + (fee.fixedAmount ?? 0),
@@ -186,12 +217,51 @@ function calculateAddOnTopFees(
     (sum, fee) => sum + percent(fee.percent ?? 0),
     0,
   );
-  const customerPriceBeforeTax =
-    totalPercent === 0
-      ? salePriceAllJobs + totalFixedAmount
-      : (salePriceAllJobs + totalFixedAmount) / (1 - totalPercent);
+  const taxIncludesAddOnTopFees = pricingOptions.taxBasis === "salePricePlusAddOnTopFees";
+  const addOnPercentUsesFinalCustomerPrice =
+    pricingOptions.addOnTopFeePercentBasis === "finalCustomerPrice";
 
-  return addOnTopFees.map((fee) => toFeeBreakdown(fee, customerPriceBeforeTax));
+  let addOnTopFeeBasis: number;
+
+  if (addOnPercentUsesFinalCustomerPrice) {
+    const taxFactor = taxIncludesAddOnTopFees ? 1 + taxPercent : 1;
+    const denominator = 1 - totalPercent * taxFactor;
+
+    if (denominator <= 0) {
+      throw new LayerRateCalculationError(
+        "addOnTop fee percentages are too high for final customer price basis.",
+        { denominator },
+      );
+    }
+
+    const addOnTopFeeAmount =
+      (totalFixedAmount + totalPercent * salePriceAllJobs * taxFactor) /
+      denominator;
+    const taxBasis = taxIncludesAddOnTopFees
+      ? salePriceAllJobs + addOnTopFeeAmount
+      : salePriceAllJobs;
+    const tax = taxBasis * taxPercent;
+    addOnTopFeeBasis = salePriceAllJobs + addOnTopFeeAmount + tax;
+  } else {
+    const denominator = 1 - totalPercent;
+    const addOnTopFeeAmount =
+      totalPercent === 0
+        ? totalFixedAmount
+        : (totalFixedAmount + totalPercent * salePriceAllJobs) / denominator;
+    addOnTopFeeBasis = salePriceAllJobs + addOnTopFeeAmount;
+  }
+
+  const addOnTopFeeBreakdown = calculateAddOnTopFees(fees, addOnTopFeeBasis);
+  const addOnTopFeeAmount = sumFees(addOnTopFeeBreakdown);
+  const taxBasis = taxIncludesAddOnTopFees
+    ? salePriceAllJobs + addOnTopFeeAmount
+    : salePriceAllJobs;
+
+  return {
+    addOnTopFeeBreakdown,
+    addOnTopFees: addOnTopFeeAmount,
+    tax: taxBasis * taxPercent,
+  };
 }
 
 function toFeeBreakdown(fee: FeeInput, basisAmount: number): FeeCostBreakdown {
@@ -209,7 +279,10 @@ function toFeeBreakdown(fee: FeeInput, basisAmount: number): FeeCostBreakdown {
 
 function calculateMaterialCost(material: MaterialInput): MaterialCostBreakdown {
   const amountGrams = massToGrams(material.amount);
-  const costPerGram = material.costPer.value / massToGrams({ value: 1, unit: material.costPer.unit });
+  const costPerGram = material.costPer.value / massToGrams({
+    value: 1,
+    unit: material.costPer.unit,
+  });
 
   return {
     name: material.name,
@@ -218,170 +291,24 @@ function calculateMaterialCost(material: MaterialInput): MaterialCostBreakdown {
   };
 }
 
-function massToGrams(amount: AmountWithMassUnit): number {
-  if (amount.unit === "kg") {
-    return amount.value * GRAMS_PER_KG;
-  }
-
-  return amount.value;
-}
-
-function durationToHours(duration: DurationInput): number {
-  return (duration.hours ?? 0) + (duration.minutes ?? 0) / MINUTES_PER_HOUR;
-}
-
-function percent(value: number): number {
-  return value / 100;
-}
-
-function sumBreakdown(breakdown: QuoteCostBreakdown): number {
-  return Object.values(breakdown).reduce((sum, value) => sum + value, 0);
-}
-
-function sumFees(fees: FeeCostBreakdown[]): number {
-  return fees.reduce((sum, fee) => sum + fee.amount, 0);
-}
-
-function validateInput(input: LayerRateQuoteInput): void {
-  validateNonNegativeFinite("designCost", input.designCost);
-  validateMaterials(input.materials);
-  validateDuration("printTime", input.printTime);
-  validateNonNegativeFinite("printerPurchasePrice", input.printerPurchasePrice);
-  validateNonNegativeFinite("printerPowerWatts", input.printerPowerWatts);
-  validateNonNegativeFinite("electricityCostPerKwh", input.electricityCostPerKwh);
-  validateNonNegativeFinite("printerLifetimeYears", input.printerLifetimeYears);
-  validateNonNegativeFinite("typicalUsageHoursPerDay", input.typicalUsageHoursPerDay);
-  validateNonNegativeFinite("repairRatioPercent", input.repairRatioPercent);
-  validateNonNegativeFinite("laborCostPerHour", input.laborCostPerHour);
-  validateDuration("setupTime", input.setupTime);
-  validateDuration("operationsTime", input.operationsTime);
-  validateDuration("postProcessingTime", input.postProcessingTime);
-  validateNonNegativeFinite("failRatioPercent", input.failRatioPercent);
-  validateNonNegativeFinite("componentCost", input.componentCost);
-  validatePricing(input.pricing);
-  validateNonNegativeFinite("quantity", input.quantity);
-
-  if (input.taxPercent !== undefined) {
-    validateNonNegativeFinite("taxPercent", input.taxPercent);
-  }
-
-  validateFees(input.fees ?? []);
-
-  if (input.typicalUsageHoursPerDay <= 0) {
-    throw new Error("typicalUsageHoursPerDay must be greater than 0.");
-  }
-
-  if (input.typicalUsageHoursPerDay > HOURS_PER_DAY) {
-    throw new Error("typicalUsageHoursPerDay cannot exceed 24.");
-  }
-
-  if (input.printerLifetimeYears <= 0) {
-    throw new Error("printerLifetimeYears must be greater than 0.");
-  }
-
-  if (input.failRatioPercent > 100) {
-    throw new Error("failRatioPercent cannot exceed 100.");
-  }
-
-  if (input.quantity < 1 || !Number.isInteger(input.quantity)) {
-    throw new Error("quantity must be a positive integer.");
-  }
-}
-
-function validateMaterials(materials: MaterialInput[]): void {
-  if (!Array.isArray(materials) || materials.length === 0) {
-    throw new Error("materials must contain at least one material.");
-  }
-
-  materials.forEach((material, index) => {
-    validateMassAmount(`materials[${index}].amount`, material.amount);
-    validateMassAmount(`materials[${index}].costPer`, material.costPer);
-  });
-}
-
-function validateMassAmount(name: string, amount: AmountWithMassUnit): void {
-  validateNonNegativeFinite(`${name}.value`, amount.value);
-
-  if (amount.unit !== "g" && amount.unit !== "kg") {
-    throw new Error(`${name}.unit must be "g" or "kg".`);
-  }
-}
-
-function validateDuration(name: string, duration: DurationInput): void {
-  const hasHours = duration.hours !== undefined;
-  const hasMinutes = duration.minutes !== undefined;
-
-  if (!hasHours && !hasMinutes) {
-    throw new Error(`${name} must include hours, minutes, or both.`);
-  }
-
-  if (hasHours) {
-    validateNonNegativeFinite(`${name}.hours`, duration.hours ?? 0);
-  }
-
-  if (hasMinutes) {
-    validateNonNegativeFinite(`${name}.minutes`, duration.minutes ?? 0);
-  }
-}
-
-function validatePricing(pricing: LayerRateQuoteInput["pricing"]): void {
-  if (pricing.mode !== "markup" && pricing.mode !== "margin") {
-    throw new Error('pricing.mode must be "markup" or "margin".');
-  }
-
-  validateNonNegativeFinite("pricing.percent", pricing.percent);
-
-  if (pricing.mode === "margin" && pricing.percent >= 100) {
-    throw new Error("pricing.percent must be less than 100 for margin pricing.");
-  }
-}
-
-function validateFees(fees: FeeInput[]): void {
-  fees.forEach((fee, index) => {
-    if (fee.behavior !== "recover" && fee.behavior !== "addOnTop") {
-      throw new Error(`fees[${index}].behavior must be "recover" or "addOnTop".`);
-    }
-
-    if (fee.fixedAmount !== undefined) {
-      validateNonNegativeFinite(`fees[${index}].fixedAmount`, fee.fixedAmount);
-    }
-
-    if (fee.percent !== undefined) {
-      validateNonNegativeFinite(`fees[${index}].percent`, fee.percent);
-    }
-  });
-
-  validateFeePercentTotal(fees, "recover");
-  validateFeePercentTotal(fees, "addOnTop");
-}
-
-function validateFeePercentTotal(
-  fees: FeeInput[],
-  behavior: FeeInput["behavior"],
-): void {
-  const totalPercent = fees
-    .filter((fee) => fee.behavior === behavior)
-    .reduce((sum, fee) => sum + (fee.percent ?? 0), 0);
-
-  if (totalPercent >= 100) {
-    throw new Error(`${behavior} fee percentages must total less than 100.`);
-  }
-}
-
-function validateNonNegativeFinite(name: string, value: number): void {
-  if (!Number.isFinite(value)) {
-    throw new Error(`${name} must be a finite number.`);
-  }
-
-  if (value < 0) {
-    throw new Error(`${name} cannot be negative.`);
-  }
+function normalizePricingOptions(
+  pricingOptions: PricingOptionsInput | undefined,
+): Required<PricingOptionsInput> {
+  return {
+    taxBasis: pricingOptions?.taxBasis ?? DEFAULT_PRICING_OPTIONS.taxBasis,
+    addOnTopFeePercentBasis:
+      pricingOptions?.addOnTopFeePercentBasis ??
+      DEFAULT_PRICING_OPTIONS.addOnTopFeePercentBasis,
+  };
 }
 
 function validateOutput(values: Record<string, number>): void {
   for (const [name, value] of Object.entries(values)) {
     if (!Number.isFinite(value)) {
-      throw new Error(`${name} must be finite.`);
+      throw new LayerRateCalculationError(`${name} must be finite.`, {
+        name,
+        value,
+      });
     }
   }
 }

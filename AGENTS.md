@@ -44,7 +44,7 @@ Future apps and tools around the core can add:
 - farm profiles
 - G-code or 3MF import
 - OrcaSlicer post-processing scripts
-- MCP/API wrappers
+- API wrappers
 
 ## Engineering Rules
 
@@ -53,3 +53,4 @@ Future apps and tools around the core can add:
 - Keep monetary calculations deterministic and easy to audit.
 - Do not hide business assumptions inside UI-only code.
 - If a formula is uncertain, document the assumption in code or tests.
+- Treat `failRatioPercent` as a surcharge ratio, not as statistical failure probability.

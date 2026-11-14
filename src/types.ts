@@ -6,6 +6,10 @@ export type FeeBehavior = "recover" | "addOnTop";
 
 export type PricingMode = "markup" | "margin";
 
+export type TaxBasis = "salePrice" | "salePricePlusAddOnTopFees";
+
+export type AddOnTopFeePercentBasis = "preTaxCustomerPrice" | "finalCustomerPrice";
+
 export interface AmountWithMassUnit {
   value: number;
   unit: MassUnit;
@@ -25,6 +29,11 @@ export interface DurationInput {
 export interface PricingInput {
   mode: PricingMode;
   percent: number;
+}
+
+export interface PricingOptionsInput {
+  taxBasis?: TaxBasis;
+  addOnTopFeePercentBasis?: AddOnTopFeePercentBasis;
 }
 
 export interface FeeInput {
@@ -51,6 +60,7 @@ export interface LayerRateQuoteInput {
   failRatioPercent: number;
   componentCost: CurrencyAmount;
   pricing: PricingInput;
+  pricingOptions?: PricingOptionsInput;
   quantity: number;
   taxPercent?: number;
   fees?: FeeInput[];
