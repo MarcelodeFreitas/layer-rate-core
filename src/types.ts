@@ -103,6 +103,7 @@ export interface LayerRateQuoteResult {
   baseCustomerPriceAllJobs: CurrencyAmount;
   customerPriceAllJobs: CurrencyAmount;
   productionCostAllJobs: CurrencyAmount;
+  totalCostPerJob: CurrencyAmount;
   recoverableFees: CurrencyAmount;
   addOnTopFees: CurrencyAmount;
   tax: CurrencyAmount;

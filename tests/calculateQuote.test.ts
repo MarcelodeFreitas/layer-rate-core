@@ -47,6 +47,9 @@ describe("calculateQuote", () => {
     expect(quote.perJob.design).toBeCloseTo(0, 2);
     expect(quote.perJob.setup).toBeCloseTo(0.17, 2);
     expect(quote.productionCostAllJobs).toBeCloseTo(1.55, 2);
+    const perJobLines = Object.values(quote.perJob).reduce((sum, v) => sum + v, 0);
+    expect(quote.totalCostPerJob).toBeCloseTo(perJobLines, 9);
+    expect(quote.totalCostPerJob).toBeCloseTo(1.55, 2);
     expect(quote.totalProfitAllJobs).toBeCloseTo(3.46, 2);
     expect(quote.customerPriceAllJobs).toBeCloseTo(5.01, 2);
     expect(quote.perJobCustomerPrice).toBeCloseTo(5.01, 2);

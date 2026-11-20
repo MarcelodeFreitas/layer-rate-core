@@ -134,6 +134,7 @@ export function calculateQuote(input: LayerRateQuoteInput): LayerRateQuoteResult
     baseCustomerPriceAllJobs,
     customerPriceAllJobs,
     productionCostAllJobs,
+    totalCostPerJob: productionCostAllJobs / quantity,
     recoverableFees,
     addOnTopFees,
     tax,
